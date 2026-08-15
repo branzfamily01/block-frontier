@@ -1,0 +1,180 @@
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.enableVertexAttribArray(pLoc);
+    gl.vertexAttribPointer(pLoc, 3, gl.FLOAT, false, 0, 0);
+
+    const cLoc = gl.getAttribLocation(program, 'a_color');
+    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+    gl.enableVertexAttribArray(cLoc);
+    gl.vertexAttribPointer(cLoc, 3, gl.FLOAT, false, 0, 0);
+
+    gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
+  }
+
+  function playerCollides(x, y, z) {
+    const minX = Math.floor(x - PLAYER_RADIUS);
+    const maxX = Math.floor(x + PLAYER_RADIUS);
+    const minY = Math.floor(y + 0.02);
+    const maxY = Math.floor(y + PLAYER_HEIGHT - 0.02);
+    const minZ = Math.floor(z - PLAYER_RADIUS);
+    const maxZ = Math.floor(z + PLAYER_RADIUS);
+    for (let bx=minX; bx<=maxX; bx++) for (let by=minY; by<=maxY; by++) for (let bz=minZ; bz<=maxZ; bz++) {
+      if (getBlock(bx,by,bz)) return true;
+    }
+    return false;
+  }
+
+  function tryHorizontal(axis, amount) {
+    if (!amount) return;
+    let nx = player.x, nz = player.z;
+    if (axis === 'x') nx += amount; else nz += amount;
+    nx = Math.max(PLAYER_RADIUS + .03, Math.min(WORLD_SIZE - PLAYER_RADIUS - .03, nx));
+    nz = Math.max(PLAYER_RADIUS + .03, Math.min(WORLD_SIZE - PLAYER_RADIUS - .03, nz));
+    if (!playerCollides(nx, player.y, nz)) {
+      player.x = nx; player.z = nz; return;
+    }
+    if (player.grounded) {
+      const stepY = player.y + 1.01;
+      if (!playerCollides(nx, stepY, nz)) {
+        player.x = nx; player.z = nz; player.y = stepY; player.grounded = false;
+      }
+    }
+  }
+
+  function jump() {
+    if (player.grounded) {
+      player.vy = 7.1;
+      player.grounded = false;
+      beep(160, .05, 'square', .025);
+    }
+  }
+
+  function update(dt) {
+    if (!started) return;
+    const fwdInput = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) - joystickState.y;
+    const strafeInput = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) + joystickState.x;
+    let fx = Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+    let rx = Math.cos(player.yaw), rz = Math.sin(player.yaw);
+    let mx = fx * fwdInput + rx * strafeInput;
+    let mz = fz * fwdInput + rz * strafeInput;
+    const mlen = Math.hypot(mx,mz);
+    if (mlen > 1) { mx/=mlen; mz/=mlen; }
+    const speed = keys.has('ShiftLeft') ? 6.2 : 4.25;
+    tryHorizontal('x', mx * speed * dt);
+    tryHorizontal('z', mz * speed * dt);
+
+    player.vy -= 18.5 * dt;
+    const nextY = player.y + player.vy * dt;
+    if (!playerCollides(player.x, nextY, player.z)) {
+      player.y = nextY;
+      player.grounded = false;
+    } else {
+      if (player.vy < 0) player.grounded = true;
+      player.vy = 0;
+    }
+
+    if (player.y < -8) {
+      player.y = highestBlockAt(Math.floor(WORLD_SIZE/2), Math.floor(WORLD_SIZE/2)) + 1.01;
+      player.x = WORLD_SIZE/2 + .5; player.z = WORLD_SIZE/2 + .5; player.vy = 0;
+      toast('RESPAWN');
+    }
+  }
+
+  function raycastVoxel(maxDist = REACH) {
+    const dir = viewDirection();
+    const ox = player.x, oy = player.y + EYE_HEIGHT, oz = player.z;
+    let x = Math.floor(ox), y = Math.floor(oy), z = Math.floor(oz);
+    const sx = dir[0] >= 0 ? 1 : -1, sy = dir[1] >= 0 ? 1 : -1, sz = dir[2] >= 0 ? 1 : -1;
+    const dx = Math.abs(dir[0]) < 1e-8 ? Infinity : Math.abs(1/dir[0]);
+    const dy = Math.abs(dir[1]) < 1e-8 ? Infinity : Math.abs(1/dir[1]);
+    const dz = Math.abs(dir[2]) < 1e-8 ? Infinity : Math.abs(1/dir[2]);
+    let tx = dir[0] >= 0 ? (x+1-ox) * dx : (ox-x) * dx;
+    let ty = dir[1] >= 0 ? (y+1-oy) * dy : (oy-y) * dy;
+    let tz = dir[2] >= 0 ? (z+1-oz) * dz : (oz-z) * dz;
+    let dist = 0;
+    let normal = [0,0,0];
+
+    for (let i=0;i<64 && dist<=maxDist;i++) {
+      const type = getBlock(x,y,z);
+      if (type) return { x,y,z,type,normal, place:[x+normal[0], y+normal[1], z+normal[2]] };
+      if (tx < ty && tx < tz) {
+        x += sx; dist = tx; tx += dx; normal = [-sx,0,0];
+      } else if (ty < tz) {
+        y += sy; dist = ty; ty += dy; normal = [0,-sy,0];
+      } else {
+        z += sz; dist = tz; tz += dz; normal = [0,0,-sz];
+      }
+    }
+    return null;
+  }
+
+  function mineBlock() {
+    if (!started) return;
+    const hit = raycastVoxel();
+    if (!hit) { beep(95,.04,'square',.018); return; }
+    if (hit.type === 8) { toast('BEDROCK — BREAK IMPOSSIBLE'); beep(70,.08,'square',.035); return; }
+    setBlock(hit.x, hit.y, hit.z, 0);
+    if (hit.type === 6) {
+      toast('✦ CRYSTAL CORE!');
+      crystalChime();
+    } else {
+      beep(115 + hit.type*9, .055, 'square', .035);
+    }
+  }
+
+  function placeBlock() {
+    if (!started) return;
+    const hit = raycastVoxel();
+    if (!hit) { beep(100,.04,'square',.018); return; }
+    const [x,y,z] = hit.place;
+    if (x < 0 || z < 0 || x >= WORLD_SIZE || z >= WORLD_SIZE || y < 1 || y > MAX_BUILD_Y) {
+      toast('ここには置けません'); return;
+    }
+    if (getBlock(x,y,z)) return;
+    world.set(key(x,y,z), selectedType);
+    if (playerCollides(player.x, player.y, player.z)) {
+      world.delete(key(x,y,z));
+      toast('自分の場所には置けません');
+      return;
+    }
+    worldDirty = true;
+    scheduleSave();
+    beep(205 + selectedType*14, .045, 'square', .025);
+  }
+
+  function renderHotbar() {
+    hotbar.innerHTML = '';
+    HOTBAR_TYPES.forEach((type, i) => {
+      const b = BLOCKS[type];
+      const btn = document.createElement('button');
+      btn.className = 'slot' + (selectedType === type ? ' selected' : '');
+      btn.setAttribute('aria-label', `${b.label}ブロックを選択`);
+      btn.innerHTML = `<small>${i+1}</small><span class="block-icon" style="background:${b.icon}"></span>`;
+      btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        selectedType = type;
+        renderHotbar();
+        toast(`${b.label}ブロック`);
+        beep(280 + i*35, .035, 'sine', .02);
+        scheduleSave();
+      });
+      hotbar.appendChild(btn);
+    });
+  }
+
+  function toast(message) {
+    toastEl.textContent = message;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1200);
+  }
+
+  function initAudio() {
+    if (!soundEnabled) return;
+    if (!audioCtx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) audioCtx = new Ctx();
+    }
+    if (audioCtx?.state === 'suspended') audioCtx.resume().catch(()=>{});
+  }
+
+  function beep(freq=220, duration=.06, wave='square', volume=.03) {
