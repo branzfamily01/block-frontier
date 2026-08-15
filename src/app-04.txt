@@ -1,0 +1,173 @@
+    if (!soundEnabled) return;
+    initAudio();
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = wave; osc.frequency.value = freq;
+    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(.0001, audioCtx.currentTime + duration);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(); osc.stop(audioCtx.currentTime + duration);
+  }
+
+  function crystalChime() {
+    beep(520,.12,'sine',.045);
+    setTimeout(()=>beep(720,.16,'sine',.04),85);
+    setTimeout(()=>beep(960,.20,'sine',.035),165);
+  }
+
+  function updateSoundButton() {
+    soundBtn.textContent = soundEnabled ? '🔊 SOUND ON' : '🔇 SOUND OFF';
+  }
+
+  function beginGame() {
+    started = true;
+    startOverlay.classList.remove('show');
+    helpOverlay.classList.remove('show');
+    startBtn.textContent = '▶ つづける';
+    initAudio();
+    beep(260,.05,'square',.03);
+    setTimeout(()=>beep(380,.08,'square',.025),60);
+    if (!isTouch && canvas.requestPointerLock) canvas.requestPointerLock();
+  }
+
+  function openHelp() {
+    helpOverlay.classList.add('show');
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  function closeHelpAndResume() {
+    helpOverlay.classList.remove('show');
+    if (started && !isTouch && canvas.requestPointerLock) canvas.requestPointerLock();
+  }
+
+  function setupInput() {
+    addEventListener('keydown', (e) => {
+      if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+      keys.add(e.code);
+      if (e.code === 'Space' && !e.repeat) jump();
+      if (e.code.startsWith('Digit')) {
+        const i = Number(e.code.slice(5)) - 1;
+        if (HOTBAR_TYPES[i]) { selectedType = HOTBAR_TYPES[i]; renderHotbar(); scheduleSave(); }
+      }
+    }, { passive:false });
+    addEventListener('keyup', e => keys.delete(e.code));
+
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!started) return;
+      if (e.pointerType === 'touch') {
+        if (lookState.pointerId !== null) return;
+        lookState.pointerId = e.pointerId; lookState.x = e.clientX; lookState.y = e.clientY;
+        canvas.setPointerCapture?.(e.pointerId);
+      } else {
+        if (document.pointerLockElement !== canvas && !isTouch) {
+          canvas.requestPointerLock?.(); return;
+        }
+        if (e.button === 0) mineBlock();
+        if (e.button === 2) placeBlock();
+      }
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'touch' && lookState.pointerId === e.pointerId) {
+        const dx = e.clientX - lookState.x, dy = e.clientY - lookState.y;
+        lookState.x = e.clientX; lookState.y = e.clientY;
+        player.yaw += dx * .0060;
+        player.pitch -= dy * .0054;
+        player.pitch = Math.max(-1.38, Math.min(1.38, player.pitch));
+      }
+    });
+    const endLook = e => { if (lookState.pointerId === e.pointerId) lookState.pointerId = null; };
+    canvas.addEventListener('pointerup', endLook); canvas.addEventListener('pointercancel', endLook);
+
+    addEventListener('mousemove', (e) => {
+      if (started && document.pointerLockElement === canvas) {
+        player.yaw += e.movementX * .00235;
+        player.pitch -= e.movementY * .00215;
+        player.pitch = Math.max(-1.42, Math.min(1.42, player.pitch));
+      }
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+      if (!isTouch && started && document.pointerLockElement !== canvas && !helpOverlay.classList.contains('show')) {
+        startOverlay.classList.add('show');
+      }
+    });
+
+    joystick.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      joystickState.pointerId = e.pointerId;
+      joystick.setPointerCapture?.(e.pointerId);
+      updateJoystick(e);
+    });
+    joystick.addEventListener('pointermove', e => {
+      if (joystickState.pointerId === e.pointerId) updateJoystick(e);
+    });
+    const endJoy = e => {
+      if (joystickState.pointerId !== e.pointerId) return;
+      joystickState.pointerId = null; joystickState.x = 0; joystickState.y = 0;
+      stick.style.transform = 'translate(0px,0px)';
+    };
+    joystick.addEventListener('pointerup', endJoy); joystick.addEventListener('pointercancel', endJoy);
+
+    mineBtn.addEventListener('pointerdown', e => { e.preventDefault(); mineBlock(); });
+    placeBtn.addEventListener('pointerdown', e => { e.preventDefault(); placeBlock(); });
+    jumpBtn.addEventListener('pointerdown', e => { e.preventDefault(); jump(); });
+  }
+
+  function updateJoystick(e) {
+    const r = joystick.getBoundingClientRect();
+    const cx = r.left + r.width/2, cy = r.top + r.height/2;
+    let dx = e.clientX - cx, dy = e.clientY - cy;
+    const max = r.width * .32;
+    const len = Math.hypot(dx,dy);
+    if (len > max) { dx = dx/len*max; dy = dy/len*max; }
+    joystickState.x = dx/max;
+    joystickState.y = dy/max;
+    stick.style.transform = `translate(${dx}px,${dy}px)`;
+  }
+
+  function updateStatus(now) {
+    if (now - lastStatusTime < 250) return;
+    lastStatusTime = now;
+    const b = BLOCKS[selectedType];
+    statusChip.textContent = `${b.name} · X${Math.floor(player.x)} Y${Math.floor(player.y)} Z${Math.floor(player.z)}`;
+  }
+
+  function gameLoop(now) {
+    const dt = Math.min(.035, Math.max(0, (now - lastTime) / 1000));
+    lastTime = now;
+    update(dt);
+    updateStatus(now);
+    render();
+    requestAnimationFrame(gameLoop);
+  }
+
+  startBtn.addEventListener('click', beginGame);
+  resetBtn.addEventListener('click', resetWorld);
+  soundBtn.addEventListener('click', () => { soundEnabled = !soundEnabled; updateSoundButton(); if (soundEnabled) beep(330,.07,'sine',.035); scheduleSave(); });
+  helpBtn.addEventListener('click', openHelp);
+  closeHelp.addEventListener('click', closeHelpAndResume);
+  resumeBtn.addEventListener('click', closeHelpAndResume);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
+  addEventListener('beforeunload', saveNow);
+
+  function init() {
+    if (!loadSavedWorld()) generateWorld();
+    if (!world.size) generateWorld();
+    if (playerCollides(player.x, player.y, player.z) || player.y < 0 || player.x < 0 || player.z < 0 || player.x >= WORLD_SIZE || player.z >= WORLD_SIZE) {
+      spawnPlayer(true);
+    }
+    renderHotbar();
+    updateSoundButton();
+    setupInput();
+    if (!initGL()) return;
+    requestAnimationFrame(gameLoop);
+
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+      navigator.serviceWorker.register('./sw.js').catch(()=>{});
+    }
+  }
+
+  init();
+})();
