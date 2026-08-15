@@ -1,0 +1,183 @@
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const startOverlay = document.getElementById('startOverlay');
+  const helpOverlay = document.getElementById('helpOverlay');
+  const errorOverlay = document.getElementById('errorOverlay');
+  const startBtn = document.getElementById('startBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const soundBtn = document.getElementById('soundBtn');
+  const helpBtn = document.getElementById('helpBtn');
+  const closeHelp = document.getElementById('closeHelp');
+  const resumeBtn = document.getElementById('resumeBtn');
+  const hotbar = document.getElementById('hotbar');
+  const statusChip = document.getElementById('statusChip');
+  const toastEl = document.getElementById('toast');
+  const joystick = document.getElementById('joystick');
+  const stick = document.getElementById('stick');
+  const mineBtn = document.getElementById('mineBtn');
+  const placeBtn = document.getElementById('placeBtn');
+  const jumpBtn = document.getElementById('jumpBtn');
+
+  const isTouch = matchMedia('(hover: none), (pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+  const SAVE_KEY = 'blockFrontierSaveV1';
+  const WORLD_SIZE = 30;
+  const MAX_BUILD_Y = 18;
+  const PLAYER_RADIUS = 0.28;
+  const PLAYER_HEIGHT = 1.72;
+  const EYE_HEIGHT = 1.58;
+  const REACH = 6.2;
+
+  const BLOCKS = {
+    1: { name: 'GRASS',   label: '草',       color: [0.31, 0.72, 0.27], icon: '#54b84f' },
+    2: { name: 'DIRT',    label: '土',       color: [0.49, 0.32, 0.20], icon: '#855a3d' },
+    3: { name: 'STONE',   label: '石',       color: [0.48, 0.52, 0.56], icon: '#7d858d' },
+    4: { name: 'SAND',    label: '砂',       color: [0.88, 0.76, 0.46], icon: '#e1c676' },
+    5: { name: 'WOOD',    label: '木',       color: [0.52, 0.34, 0.17], icon: '#8c5c2c' },
+    6: { name: 'CRYSTAL', label: 'クリスタル', color: [0.35, 0.89, 0.97], icon: '#52d9f0' },
+    7: { name: 'LEAVES',  label: '葉',       color: [0.22, 0.58, 0.25], icon: '#3f9146' },
+    8: { name: 'BEDROCK', label: '岩盤',     color: [0.18, 0.20, 0.23], icon: '#30343a' },
+  };
+  const HOTBAR_TYPES = [1, 2, 3, 4, 5, 6];
+
+  let gl = null;
+  let program = null;
+  let positionBuffer = null;
+  let colorBuffer = null;
+  let matrixLocation = null;
+  let vertexCount = 0;
+  let world = new Map();
+  let selectedType = 1;
+  let worldDirty = true;
+  let started = false;
+  let soundEnabled = true;
+  let audioCtx = null;
+  let lastTime = performance.now();
+  let lastStatusTime = 0;
+  let saveTimer = 0;
+  let toastTimer = 0;
+
+  const player = {
+    x: WORLD_SIZE / 2 + 0.5,
+    y: 5,
+    z: WORLD_SIZE / 2 + 0.5,
+    vy: 0,
+    yaw: Math.PI,
+    pitch: -0.08,
+    grounded: false,
+  };
+  const keys = new Set();
+  const joystickState = { x: 0, y: 0, pointerId: null };
+  const lookState = { pointerId: null, x: 0, y: 0 };
+
+  function key(x, y, z) { return `${x},${y},${z}`; }
+  function getBlock(x, y, z) { return world.get(key(x, y, z)) || 0; }
+  function setBlock(x, y, z, type) {
+    const k = key(x, y, z);
+    if (type) world.set(k, type); else world.delete(k);
+    worldDirty = true;
+    scheduleSave();
+  }
+
+  function hash2(x, z) {
+    const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453123;
+    return s - Math.floor(s);
+  }
+
+  function terrainHeight(x, z) {
+    const nx = x - WORLD_SIZE / 2;
+    const nz = z - WORLD_SIZE / 2;
+    const wave = Math.sin(nx * 0.31) * 0.7 + Math.cos(nz * 0.27) * 0.6 + Math.sin((nx + nz) * 0.16) * 0.45;
+    let h = 2;
+    if (wave > 0.28) h += 1;
+    if (wave > 1.05) h += 1;
+    return h;
+  }
+
+  function generateWorld() {
+    world.clear();
+    for (let x = 0; x < WORLD_SIZE; x++) {
+      for (let z = 0; z < WORLD_SIZE; z++) {
+        const h = terrainHeight(x, z);
+        world.set(key(x, 0, z), 8);
+        for (let y = 1; y < h; y++) {
+          world.set(key(x, y, z), y <= 1 ? 3 : 2);
+        }
+        const edge = x < 2 || z < 2 || x > WORLD_SIZE - 3 || z > WORLD_SIZE - 3;
+        world.set(key(x, h, z), edge ? 4 : 1);
+
+        const dx = x - WORLD_SIZE / 2;
+        const dz = z - WORLD_SIZE / 2;
+        const awayFromSpawn = Math.hypot(dx, dz) > 5;
+        const r = hash2(x, z);
+        if (!edge && awayFromSpawn && r > 0.945) addTree(x, h + 1, z);
+        if (!edge && awayFromSpawn && r > 0.905 && r < 0.918) {
+          world.set(key(x, h + 1, z), 6);
+        }
+      }
+    }
+    worldDirty = true;
+    spawnPlayer(true);
+  }
+
+  function addTree(x, y, z) {
+    const trunk = 2 + Math.floor(hash2(x + 9, z + 3) * 2);
+    for (let i = 0; i < trunk; i++) world.set(key(x, y + i, z), 5);
+    const top = y + trunk;
+    for (let ox = -1; ox <= 1; ox++) {
+      for (let oz = -1; oz <= 1; oz++) {
+        if (Math.abs(ox) + Math.abs(oz) <= 2) world.set(key(x + ox, top, z + oz), 7);
+      }
+    }
+    world.set(key(x, top + 1, z), 7);
+  }
+
+  function highestBlockAt(x, z) {
+    for (let y = MAX_BUILD_Y; y >= 0; y--) if (getBlock(x, y, z)) return y;
+    return 0;
+  }
+
+  function spawnPlayer(force = false) {
+    if (!force && Number.isFinite(player.y)) return;
+    const sx = Math.floor(WORLD_SIZE / 2);
+    const sz = Math.floor(WORLD_SIZE / 2);
+    player.x = sx + 0.5;
+    player.z = sz + 0.5;
+    player.y = highestBlockAt(sx, sz) + 1.01;
+    player.vy = 0;
+    player.grounded = false;
+  }
+
+  function saveNow() {
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify({
+        v: 1,
+        world: Array.from(world.entries()),
+        selectedType,
+        player: { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch },
+        soundEnabled,
+      }));
+    } catch (_) {}
+  }
+
+  function scheduleSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveNow, 450);
+  }
+
+  function loadSavedWorld() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return false;
+      const data = JSON.parse(raw);
+      if (!data || data.v !== 1 || !Array.isArray(data.world)) return false;
+      world = new Map(data.world);
+      selectedType = HOTBAR_TYPES.includes(data.selectedType) ? data.selectedType : 1;
+      if (data.player) {
+        player.x = Number(data.player.x) || WORLD_SIZE / 2 + 0.5;
+        player.y = Number(data.player.y) || 5;
+        player.z = Number(data.player.z) || WORLD_SIZE / 2 + 0.5;
+        player.yaw = Number.isFinite(data.player.yaw) ? data.player.yaw : Math.PI;
+        player.pitch = Number.isFinite(data.player.pitch) ? data.player.pitch : -0.08;
+      }
