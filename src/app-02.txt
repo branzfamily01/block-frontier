@@ -1,0 +1,191 @@
+      if (typeof data.soundEnabled === 'boolean') soundEnabled = data.soundEnabled;
+      worldDirty = true;
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function resetWorld() {
+    if (!confirm('この端末に保存されたワールドを消して、最初から作り直しますか？')) return;
+    localStorage.removeItem(SAVE_KEY);
+    generateWorld();
+    selectedType = 1;
+    renderHotbar();
+    updateSoundButton();
+    saveNow();
+    toast('NEW WORLD CREATED');
+    beep(180, 0.09, 'square', 0.05);
+    setTimeout(() => beep(260, 0.12, 'square', 0.04), 80);
+  }
+
+  function initGL() {
+    gl = canvas.getContext('webgl', { antialias: true, alpha: false, powerPreference: 'high-performance' }) ||
+         canvas.getContext('experimental-webgl');
+    if (!gl) {
+      errorOverlay.classList.add('show');
+      return false;
+    }
+
+    const vs = `
+      attribute vec3 a_position;
+      attribute vec3 a_color;
+      uniform mat4 u_matrix;
+      varying vec3 v_color;
+      void main(){
+        gl_Position = u_matrix * vec4(a_position, 1.0);
+        v_color = a_color;
+      }
+    `;
+    const fs = `
+      precision mediump float;
+      varying vec3 v_color;
+      void main(){
+        gl_FragColor = vec4(v_color, 1.0);
+      }
+    `;
+    const vert = compileShader(gl.VERTEX_SHADER, vs);
+    const frag = compileShader(gl.FRAGMENT_SHADER, fs);
+    if (!vert || !frag) return false;
+    program = gl.createProgram();
+    gl.attachShader(program, vert);
+    gl.attachShader(program, frag);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error(gl.getProgramInfoLog(program));
+      errorOverlay.classList.add('show');
+      return false;
+    }
+
+    positionBuffer = gl.createBuffer();
+    colorBuffer = gl.createBuffer();
+    matrixLocation = gl.getUniformLocation(program, 'u_matrix');
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.clearColor(0.44, 0.74, 0.98, 1);
+    return true;
+  }
+
+  function compileShader(type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(shader));
+      return null;
+    }
+    return shader;
+  }
+
+  const FACES = [
+    { n:[ 1, 0, 0], shade:.82, c:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
+    { n:[-1, 0, 0], shade:.70, c:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
+    { n:[ 0, 1, 0], shade:1.08, c:[[0,1,1],[1,1,1],[1,1,0],[0,1,0]] },
+    { n:[ 0,-1, 0], shade:.53, c:[[0,0,0],[1,0,0],[1,0,1],[0,0,1]] },
+    { n:[ 0, 0, 1], shade:.90, c:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
+    { n:[ 0, 0,-1], shade:.76, c:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]] },
+  ];
+
+  function rebuildGeometry() {
+    const positions = [];
+    const colors = [];
+    const tri = [0,1,2, 0,2,3];
+    for (const [k, type] of world.entries()) {
+      const [x, y, z] = k.split(',').map(Number);
+      const block = BLOCKS[type];
+      if (!block) continue;
+      for (const face of FACES) {
+        const nx = x + face.n[0], ny = y + face.n[1], nz = z + face.n[2];
+        if (getBlock(nx, ny, nz)) continue;
+        const variation = 0.94 + hash2(x * 7 + y * 11 + face.n[0] * 3, z * 5 + face.n[2] * 13) * 0.08;
+        let r = Math.min(1, block.color[0] * face.shade * variation);
+        let g = Math.min(1, block.color[1] * face.shade * variation);
+        let b = Math.min(1, block.color[2] * face.shade * variation);
+        if (type === 1 && face.n[1] <= 0) { r *= .82; g *= .78; b *= .72; }
+        if (type === 6) { r = Math.min(1, r * 1.2); g = Math.min(1, g * 1.15); b = 1; }
+        for (const idx of tri) {
+          const c = face.c[idx];
+          positions.push(x + c[0], y + c[1], z + c[2]);
+          colors.push(r, g, b);
+        }
+      }
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+    vertexCount = positions.length / 3;
+    worldDirty = false;
+  }
+
+  function resizeCanvas() {
+    const dpr = Math.min(devicePixelRatio || 1, isTouch ? 1.5 : 2);
+    const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+
+  function mat4Perspective(fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2);
+    const nf = 1 / (near - far);
+    return new Float32Array([
+      f/aspect,0,0,0,
+      0,f,0,0,
+      0,0,(far+near)*nf,-1,
+      0,0,(2*far*near)*nf,0
+    ]);
+  }
+
+  function mat4LookAt(eye, center, up) {
+    let zx = eye[0]-center[0], zy = eye[1]-center[1], zz = eye[2]-center[2];
+    let len = Math.hypot(zx,zy,zz) || 1; zx/=len; zy/=len; zz/=len;
+    let xx = up[1]*zz-up[2]*zy, xy = up[2]*zx-up[0]*zz, xz = up[0]*zy-up[1]*zx;
+    len = Math.hypot(xx,xy,xz) || 1; xx/=len; xy/=len; xz/=len;
+    const yx = zy*xz-zz*xy, yy = zz*xx-zx*xz, yz = zx*xy-zy*xx;
+    return new Float32Array([
+      xx,yx,zx,0,
+      xy,yy,zy,0,
+      xz,yz,zz,0,
+      -(xx*eye[0]+xy*eye[1]+xz*eye[2]),
+      -(yx*eye[0]+yy*eye[1]+yz*eye[2]),
+      -(zx*eye[0]+zy*eye[1]+zz*eye[2]),1
+    ]);
+  }
+
+  function mat4Multiply(a, b) {
+    const out = new Float32Array(16);
+    for (let c=0;c<4;c++) {
+      for (let r=0;r<4;r++) {
+        out[c*4+r] =
+          a[0*4+r]*b[c*4+0] +
+          a[1*4+r]*b[c*4+1] +
+          a[2*4+r]*b[c*4+2] +
+          a[3*4+r]*b[c*4+3];
+      }
+    }
+    return out;
+  }
+
+  function viewDirection() {
+    const cp = Math.cos(player.pitch);
+    return [Math.sin(player.yaw)*cp, Math.sin(player.pitch), -Math.cos(player.yaw)*cp];
+  }
+
+  function render() {
+    resizeCanvas();
+    if (worldDirty) rebuildGeometry();
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(program);
+
+    const aspect = canvas.width / canvas.height;
+    const projection = mat4Perspective(Math.PI / 2.8, aspect, 0.05, 80);
+    const dir = viewDirection();
+    const eye = [player.x, player.y + EYE_HEIGHT, player.z];
+    const center = [eye[0]+dir[0], eye[1]+dir[1], eye[2]+dir[2]];
+    const view = mat4LookAt(eye, center, [0,1,0]);
+    const vp = mat4Multiply(projection, view);
+    gl.uniformMatrix4fv(matrixLocation, false, vp);
+
+    const pLoc = gl.getAttribLocation(program, 'a_position');
